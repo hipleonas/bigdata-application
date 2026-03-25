@@ -1,1 +1,5 @@
 data
+lastfm_dataset.csv
+.env
+output_github_v3
+*.log
