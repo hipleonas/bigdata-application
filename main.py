@@ -3,10 +3,11 @@ from datetime import datetime
 from collections import defaultdict, deque
 import pandas as pd
 from dotenv import load_dotenv
+
+load_dotenv()
 # ─────────────────────────────────────────────
 # CẤU HÌNH LOGGING
 # ─────────────────────────────────────────────
-load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # CONFIG NÂNG CẤP (Mục tiêu 1.2M+ Interactions)
 # ─────────────────────────────────────────────
-GITHUB_TOKEN = os.getenv("PAS_CRAWL")
+GITHUB_TOKEN = os.getenv("PAS_MAIN")
 BASE_URL = "https://api.github.com"
 
 # Targets sau k-core
@@ -49,6 +50,19 @@ PROFILES_DIR = os.path.join(OUT_DIR, "profiles")
 CHECKPOINT   = os.path.join(OUT_DIR, "checkpoint.json")
 RAW_CSV      = os.path.join(RAW_DIR, "interactions.csv")
 RAW_REPO_CSV = os.path.join(RAW_DIR, "repos.csv")
+
+# Interaction type weights for scoring (used in export/model)
+INTERACTION_WEIGHTS = {
+    "star":    1.0,
+    "fork":    1.5,   # stronger signal than star
+    "watch":   0.8,
+    "follow":  0.5,   # user→user signal (mapped to user as "item")
+}
+# Toggle which signals to collect
+COLLECT_STARS   = True
+COLLECT_FORKS   = True
+COLLECT_WATCHES = True
+COLLECT_FOLLOWS = False  # user-follow graph is separate; enable if needed
 
 for d in [OUT_DIR, RAW_DIR, LIGHTGCN_DIR, ULTRAGCN_DIR, IMREC_DIR, PROFILES_DIR]:
     os.makedirs(d, exist_ok=True)
@@ -94,10 +108,11 @@ def _handle_rate_limit(r, is_search=False):
                 time.sleep(wait)
     return True
 
-def _get_rest(url, params=None):
+def _get_rest(url, params=None, star_header=False):
+    accept = "application/vnd.github.v3.star+json" if star_header else "application/vnd.github+json"
     for attempt in range(5):
         try:
-            r = requests.get(url, headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.star+json"}, params=params, timeout=15)
+            r = requests.get(url, headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": accept}, params=params, timeout=15)
             if not _handle_rate_limit(r, is_search=False): continue
             return r.json() if r.status_code == 200 else []
         except Exception as e:
@@ -165,14 +180,82 @@ def collect_users(cp: dict):
     return users
 
 # ─────────────────────────────────────────────
-# PHASE 2: Crawl stars (Deep Star)
+# PHASE 2: Crawl multi-signal interactions
 # ─────────────────────────────────────────────
+def _crawl_starred(u, seen_repos, w_repo):
+    """Returns list of (user, repo, timestamp, 'star')"""
+    results = []
+    for page in range(1, MAX_STARRED_PAGES + 1):
+        data = _get_rest(f"{BASE_URL}/users/{u}/starred", {"per_page": 100, "page": page}, star_header=True)
+        if not data or not isinstance(data, list): break
+        for item in data:
+            repo = item["repo"]
+            name = repo.get("full_name")
+            if not name: continue
+            ts = int(datetime.strptime(item["starred_at"], "%Y-%m-%dT%H:%M:%SZ").timestamp())
+            results.append((u, name, ts, "star"))
+            if name not in seen_repos:
+                seen_repos.add(name)
+                w_repo.writerow([name, repo.get("language") or "N/A", repo.get("stargazers_count", 0), ""])
+        if len(data) < 100: break
+    return results
+
+def _crawl_forks(u, seen_repos, w_repo):
+    """Returns list of (user, repo, timestamp, 'fork') from user's forked repos."""
+    results = []
+    for page in range(1, MAX_STARRED_PAGES + 1):
+        data = _get_rest(f"{BASE_URL}/users/{u}/repos", {"per_page": 100, "page": page, "type": "forks"})
+        if not data or not isinstance(data, list): break
+        for repo in data:
+            if not repo.get("fork"): continue
+            parent = repo.get("parent") or {}
+            name = parent.get("full_name") or repo.get("full_name")
+            if not name: continue
+            ts_str = repo.get("created_at", "")
+            try:
+                ts = int(datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ").timestamp())
+            except Exception:
+                ts = int(time.time())
+            results.append((u, name, ts, "fork"))
+            if name not in seen_repos:
+                seen_repos.add(name)
+                src = parent if parent else repo
+                w_repo.writerow([name, src.get("language") or "N/A", src.get("stargazers_count", 0), ""])
+        if len(data) < 100: break
+    return results
+
+def _crawl_watches(u, seen_repos, w_repo):
+    """Returns list of (user, repo, timestamp, 'watch') — subscriptions/watched repos."""
+    results = []
+    for page in range(1, MAX_STARRED_PAGES + 1):
+        data = _get_rest(f"{BASE_URL}/users/{u}/subscriptions", {"per_page": 100, "page": page})
+        if not data or not isinstance(data, list): break
+        for repo in data:
+            name = repo.get("full_name")
+            if not name: continue
+            ts_str = repo.get("updated_at", "")
+            try:
+                ts = int(datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ").timestamp())
+            except Exception:
+                ts = int(time.time())
+            results.append((u, name, ts, "watch"))
+            if name not in seen_repos:
+                seen_repos.add(name)
+                w_repo.writerow([name, repo.get("language") or "N/A", repo.get("stargazers_count", 0), ""])
+        if len(data) < 100: break
+    return results
+
 def crawl(users, cp: dict):
     start_idx = cp.get("crawl_idx", 0)
     total_int = cp.get("total_interactions", 0)
     if start_idx >= len(users): return RAW_CSV, RAW_REPO_CSV
 
-    logger.info(f"--- PHASE 2: Crawl Star (Mục tiêu: {CRAWL_INT_TARGET:,}) ---")
+    signals = []
+    if COLLECT_STARS:   signals.append("star")
+    if COLLECT_FORKS:   signals.append("fork")
+    if COLLECT_WATCHES: signals.append("watch")
+    logger.info(f"--- PHASE 2: Crawl [{', '.join(signals)}] (Mục tiêu: {CRAWL_INT_TARGET:,}) ---")
+
     seen_repos = set()
     mode = "a" if start_idx > 0 else "w"
 
@@ -180,26 +263,19 @@ def crawl(users, cp: dict):
          open(RAW_REPO_CSV, mode, newline="", encoding="utf-8") as f_repo:
         w_int, w_repo = csv.writer(f_int), csv.writer(f_repo)
         if start_idx == 0:
-            w_int.writerow(["user", "repo", "timestamp"])
+            w_int.writerow(["user", "repo", "timestamp", "interaction_type"])
             w_repo.writerow(["repo", "language", "stars", "description"])
 
         for idx in range(start_idx, len(users)):
             u = users[idx]
             user_ints = []
 
-            for page in range(1, MAX_STARRED_PAGES + 1):
-                data = _get_rest(f"{BASE_URL}/users/{u}/starred", {"per_page": 100, "page": page})
-                if not data or not isinstance(data, list): break
-
-                for item in data:
-                    repo = item["repo"]
-                    name = repo.get("full_name")
-                    ts = int(datetime.strptime(item["starred_at"], "%Y-%m-%dT%H:%M:%SZ").timestamp())
-                    user_ints.append((u, name, ts))
-                    if name not in seen_repos:
-                        seen_repos.add(name)
-                        w_repo.writerow([name, repo.get("language") or "N/A", repo.get("stargazers_count", 0), ""])
-                if len(data) < 100: break
+            if COLLECT_STARS:
+                user_ints.extend(_crawl_starred(u, seen_repos, w_repo))
+            if COLLECT_FORKS:
+                user_ints.extend(_crawl_forks(u, seen_repos, w_repo))
+            if COLLECT_WATCHES:
+                user_ints.extend(_crawl_watches(u, seen_repos, w_repo))
 
             if user_ints:
                 w_int.writerows(user_ints)
@@ -258,7 +334,10 @@ def load_raw(path):
     with open(path, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for r in reader:
-            data[r["user"]][r["repo"]] = float(r["timestamp"])
+            itype = r.get("interaction_type", "star")
+            weight = INTERACTION_WEIGHTS.get(itype, 1.0)
+            # Store weighted timestamp so stronger signals rank higher
+            data[r["user"]][r["repo"]] = float(r["timestamp"]) * weight
     return data
 
 def kcore(data):
@@ -329,12 +408,34 @@ def get_starred_repos(username):
     try:
         res = requests.get(url, headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3.star+json"}, params=params, timeout=10)
         if res.status_code == 200:
-            return res.json()
+            return [("star", item) for item in res.json()]
         elif res.status_code == 403:
             logger.warning("Chạm trần API (Rate Limit), tạm nghỉ 60s...")
             time.sleep(60)
             return get_starred_repos(username)
     except Exception as e:
+        pass
+    return []
+
+def get_forked_repos(username):
+    url = f"{BASE_URL}/users/{username}/repos"
+    params = {"per_page": 100, "page": 1, "type": "forks"}
+    try:
+        res = requests.get(url, headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}, params=params, timeout=10)
+        if res.status_code == 200:
+            return [("fork", r) for r in res.json() if r.get("fork")]
+    except Exception:
+        pass
+    return []
+
+def get_watched_repos(username):
+    url = f"{BASE_URL}/users/{username}/subscriptions"
+    params = {"per_page": 100, "page": 1}
+    try:
+        res = requests.get(url, headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}, params=params, timeout=10)
+        if res.status_code == 200:
+            return [("watch", r) for r in res.json()]
+    except Exception:
         pass
     return []
 
@@ -394,25 +495,42 @@ def run_crawl_more():
         w_repo = csv.writer(f_repo)
 
         for i, u in enumerate(new_users):
-            stars = get_starred_repos(u)
-            if not stars:
+            all_items = []
+            if COLLECT_STARS:   all_items.extend(get_starred_repos(u))
+            if COLLECT_FORKS:   all_items.extend(get_forked_repos(u))
+            if COLLECT_WATCHES: all_items.extend(get_watched_repos(u))
+
+            if not all_items:
                 continue
 
-            for item in stars:
-                repo_name = item.get("repo", {}).get("full_name") or item.get("full_name")
+            for itype, item in all_items:
+                if itype == "star":
+                    repo_name = item.get("repo", {}).get("full_name") or item.get("full_name")
+                    lang = item.get("repo", {}).get("language") or item.get("language", "N/A")
+                    st   = item.get("repo", {}).get("stargazers_count") or item.get("stargazers_count", 0)
+                    desc = str(item.get("repo", {}).get("description") or item.get("description", ""))[:100]
+                elif itype == "fork":
+                    parent = item.get("parent") or {}
+                    repo_name = parent.get("full_name") or item.get("full_name")
+                    lang = parent.get("language") or item.get("language", "N/A")
+                    st   = parent.get("stargazers_count") or item.get("stargazers_count", 0)
+                    desc = str(parent.get("description") or item.get("description", ""))[:100]
+                else:  # watch
+                    repo_name = item.get("full_name")
+                    lang = item.get("language", "N/A")
+                    st   = item.get("stargazers_count", 0)
+                    desc = str(item.get("description", ""))[:100]
+
                 if not repo_name:
                     continue
 
                 timestamp = int(time.time())
-                w_int.writerow([u, repo_name, timestamp])
+                w_int.writerow([u, repo_name, timestamp, itype])
                 new_int_count += 1
 
                 if repo_name not in existing_repos:
                     existing_repos.add(repo_name)
-                    lang = item.get("language", "N/A")
-                    st = item.get("stargazers_count", 0)
-                    desc = str(item.get("description", ""))[:100].replace("\n", " ")
-                    w_repo.writerow([repo_name, lang, st, desc])
+                    w_repo.writerow([repo_name, lang or "N/A", st, desc.replace("\n", "")])
 
             if (i + 1) % 50 == 0:
                 logger.info(f"[Tiến độ: {i + 1}/{TARGET_NEW_USERS}] Cào thêm được {new_int_count:,} tương tác...")
@@ -454,25 +572,25 @@ def main():
     logger.info("Hoành thành pipeline")
 
 if __name__ == "__main__":
+    main()
+
   
-    raw_interaction = os.path.join("data", "interactions.csv")
-    raw_repo = os.path.join("data", "repos.csv")
-    if not os.path.exists(raw_interaction) or not os.path.exists(raw_repo):
-        logger.error("Không tìm thấy file CSV! Hãy kiểm tra lại đường dẫn.")
+    # raw_interaction = os.path.join("data", "interactions.csv")
+    # raw_repo = os.path.join("data", "repos.csv")
+    # if not os.path.exists(raw_interaction) or not os.path.exists(raw_repo):
+    #     logger.error("Không tìm thấy file CSV! Hãy kiểm tra lại đường dẫn.")
 
-    interactions_df = pd.read_csv(raw_interaction)
-    repos_df = pd.read_csv(raw_repo)
-    df_clean   = clean(interactions_df, repos_df, min_stars=10)
-    data  = build_interaction_dict(df_clean)
+    # interactions_df = pd.read_csv(raw_interaction)
+    # repos_df = pd.read_csv(raw_repo)
+    # df_clean   = clean(interactions_df, repos_df, min_stars=10)
+    # data  = build_interaction_dict(df_clean)
     
-    data = kcore(data )
-    user2id, item2id, remapped = remap(data)
-    train, test = split(remapped)
+    # data = kcore(data )
+    # user2id, item2id, remapped = remap(data)
+    # train, test = split(remapped)
 
-    export_all(train, test, user2id, item2id, remapped, raw_repo)
-    print_stats(user2id, item2id, remapped, train, test)
+    # export_all(train, test, user2id, item2id, remapped, raw_repo)
+    # print_stats(user2id, item2id, remapped, train, test)
 
-    save_cp({"phase": "done"})
-    logger.info("PIPELINE DONE")
-    
-    
+    # save_cp({"phase": "done"})
+    # logger.info("PIPELINE DONE")

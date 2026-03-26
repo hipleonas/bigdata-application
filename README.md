@@ -24,3 +24,7 @@ This project addresses these issues by formulating the recommendation task as an
 - Missing interactions are treated as unobserved (not negative)
 
 ---
+
+## Link
+
+Data collect: https://drive.google.com/drive/folders/1t-dB_k7HnBqcgEPdei4tf6AeO3dCQUWD?hl=vi
