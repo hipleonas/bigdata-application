@@ -25,7 +25,7 @@ GITHUB_TOKEN = os.getenv("PAS_MAIN")
 BASE_URL = "https://api.github.com"
 
 # Targets sau k-core
-FINAL_USERS_MIN  = 6_000
+FINAL_USERS_MIN  = 8_000
 FINAL_INT_MIN    = 1_200_000
 
 # Crawl buffer

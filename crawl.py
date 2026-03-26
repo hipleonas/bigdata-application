@@ -398,8 +398,28 @@ def run_crawl_more():
             if not stars:
                 continue
 
+            # for item in stars:
+            #     repo_name = item.get("repo", {}).get("full_name") or item.get("full_name")
+            #     if not repo_name:
+            #         continue
+
+            #     timestamp = int(time.time())
+            #     w_int.writerow([u, repo_name, timestamp])
+            #     new_int_count += 1
+
+            #     if repo_name not in existing_repos:
+            #         existing_repos.add(repo_name)
+            #         lang = item.get("language", "N/A")
+            #         st = item.get("stargazers_count", 0)
+            #         desc = str(item.get("description", ""))[:100].replace("\n", " ")
+            #         w_repo.writerow([repo_name, lang, st, desc])
+
             for item in stars:
-                repo_name = item.get("repo", {}).get("full_name") or item.get("full_name")
+                # 1. Extract the inner repo object (falling back to 'item' just in case)
+                repo_data = item.get("repo", item) 
+                
+                # 2. Get the name from the inner object
+                repo_name = repo_data.get("full_name")
                 if not repo_name:
                     continue
 
@@ -409,10 +429,13 @@ def run_crawl_more():
 
                 if repo_name not in existing_repos:
                     existing_repos.add(repo_name)
-                    lang = item.get("language", "N/A")
-                    st = item.get("stargazers_count", 0)
-                    desc = str(item.get("description", ""))[:100].replace("\n", " ")
-                    w_repo.writerow([repo_name, lang, st, desc])
+                    
+                    # Lấy metadata cần thiết
+                    lang = repo_data.get("language") or "N/A"
+                    st = repo_data.get("stargazers_count", 0)
+                    
+                    # Bỏ qua việc lấy và xử lý description
+                    w_repo.writerow([repo_name, lang, st, ""])
 
             if (i + 1) % 50 == 0:
                 logger.info(f"[Tiến độ: {i + 1}/{TARGET_NEW_USERS}] Cào thêm được {new_int_count:,} tương tác...")
@@ -455,24 +478,26 @@ def main():
 
 if __name__ == "__main__":
   
-    raw_interaction = os.path.join("data", "interactions.csv")
-    raw_repo = os.path.join("data", "repos.csv")
-    if not os.path.exists(raw_interaction) or not os.path.exists(raw_repo):
-        logger.error("Không tìm thấy file CSV! Hãy kiểm tra lại đường dẫn.")
+    # raw_interaction = os.path.join("data", "interactions.csv")
+    # raw_repo = os.path.join("data", "repos.csv")
+    # if not os.path.exists(raw_interaction) or not os.path.exists(raw_repo):
+    #     logger.error("Không tìm thấy file CSV! Hãy kiểm tra lại đường dẫn.")
 
-    interactions_df = pd.read_csv(raw_interaction)
-    repos_df = pd.read_csv(raw_repo)
-    df_clean   = clean(interactions_df, repos_df, min_stars=10)
-    data  = build_interaction_dict(df_clean)
+    # interactions_df = pd.read_csv(raw_interaction)
+    # repos_df = pd.read_csv(raw_repo)
+    # df_clean   = clean(interactions_df, repos_df, min_stars=10)
+    # data  = build_interaction_dict(df_clean)
     
-    data = kcore(data )
-    user2id, item2id, remapped = remap(data)
-    train, test = split(remapped)
+    # data = kcore(data )
+    # user2id, item2id, remapped = remap(data)
+    # train, test = split(remapped)
 
-    export_all(train, test, user2id, item2id, remapped, raw_repo)
-    print_stats(user2id, item2id, remapped, train, test)
+    # export_all(train, test, user2id, item2id, remapped, raw_repo)
+    # print_stats(user2id, item2id, remapped, train, test)
 
-    save_cp({"phase": "done"})
-    logger.info("PIPELINE DONE")
+    # save_cp({"phase": "done"})
+    # logger.info("PIPELINE DONE")
+
+    run_crawl_more()
     
     

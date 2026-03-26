@@ -157,6 +157,8 @@ if __name__ == "__main__":
 
     interactions_df = pd.read_csv(raw_interaction)
     repos_df = pd.read_csv(raw_repo)
+    repos_df = repos_df.drop(columns=['description'])
+
     df_clean   = clean(interactions_df, repos_df, min_stars=10)
     data  = build_interaction_dict(df_clean)
     
