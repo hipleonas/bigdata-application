@@ -1,2 +1,4 @@
 interactions.csv filter=lfs diff=lfs merge=lfs -text
 repos.csv filter=lfs diff=lfs merge=lfs -text
+output_github_v3/**/*.txt filter=lfs diff=lfs merge=lfs -text
+output_github_v3/**/*.inter filter=lfs diff=lfs merge=lfs -text
