@@ -33,10 +33,6 @@ This project addresses these issues by formulating the recommendation task as an
 - Positive interactions imply preference
 - Missing interactions are treated as unobserved (not negative)
 
----
 
-## 🔗 Link
-
-Data collect: https://drive.google.com/drive/folders/1iHCPeFCWLCx9O7nBxBL8lX9jAaMhnF5v?hl=vi
 
 
