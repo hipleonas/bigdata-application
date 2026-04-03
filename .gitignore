@@ -4,3 +4,5 @@ crawl_output_github_v3
 # output_github_v3
 *.log
 # checkpoint_01
+
+data
