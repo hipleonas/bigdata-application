@@ -6,3 +6,4 @@ crawl_output_github_v3
 # checkpoint_01
 
 data
+__pycache__
